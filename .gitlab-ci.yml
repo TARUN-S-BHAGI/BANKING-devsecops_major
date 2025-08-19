@@ -1,0 +1,148 @@
+
+stages:
+  - install
+  - test
+  - security
+  - build
+  - dast
+  - publish
+  - deploy
+
+variables:
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""
+  COMPOSE_PROFILES: ci
+  ZAP_TARGET: "http://api:3000/api/health"
+  IMAGE_TAG: "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+
+.install_image: &install_image
+  image: node:20
+
+install:
+  stage: install
+  <<: *install_image
+  script:
+    - cd backend; npm ci
+    - cd ../frontend; npm ci
+  artifacts:
+    paths:
+      - backend/node_modules/
+      - frontend/node_modules/
+    expire_in: 1h
+
+test:
+  stage: test
+  <<: *install_image
+  script:
+    - cd backend; npm test || true
+  artifacts:
+    when: always
+    paths:
+      - backend/reports/
+    expire_in: 1 week
+
+snyk_scan:
+  stage: security
+  image: snyk/snyk:docker
+  variables:
+    SNYK_TOKEN: $SNYK_TOKEN
+  script:
+    - snyk test --json > snyk_report.json || true
+    - snyk monitor || true
+  artifacts:
+    when: always
+    paths:
+      - snyk_report.json
+    expire_in: 1 week
+  rules:
+    - if: $SNYK_TOKEN
+
+trivy_scan:
+  stage: security
+  image: docker:25.0.3
+  services:
+    - docker:25.0.3-dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  script:
+    - wget -q -O /usr/local/bin/trivy https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.41.2_Linux-64bit.tar.gz || true
+    - chmod +x /usr/local/bin/trivy || true
+    - trivy image --format json --output trivy_report.json $CI_REGISTRY_IMAGE/backend:${CI_COMMIT_SHORT_SHA} || true
+  needs: ["build_images"]
+  artifacts:
+    paths:
+      - trivy_report.json
+    expire_in: 1 week
+
+build_images:
+  stage: build
+  image: docker:25.0.3
+  services:
+    - docker:25.0.3-dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE/backend:${CI_COMMIT_SHORT_SHA} backend
+    - docker build -t $CI_REGISTRY_IMAGE/frontend:${CI_COMMIT_SHORT_SHA} frontend
+    - docker save $CI_REGISTRY_IMAGE/backend:${CI_COMMIT_SHORT_SHA} -o backend-image.tar
+    - docker save $CI_REGISTRY_IMAGE/frontend:${CI_COMMIT_SHORT_SHA} -o frontend-image.tar
+  artifacts:
+    paths:
+      - backend-image.tar
+      - frontend-image.tar
+    expire_in: 1 week
+
+dast_zap:
+  stage: dast
+  image: docker:25.0.3
+  services:
+    - docker:25.0.3-dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  script:
+    - docker compose -f docker-compose.yml --profile ci up -d
+    - chmod +x scripts/wait-for-http.sh
+    - ./scripts/wait-for-http.sh "http://localhost:3000/api/health" 120
+    - docker run --network devsecops_flawless_default -v $CI_PROJECT_DIR/.zap:/zap/wrk owasp/zap2docker-stable zap-baseline.py -t ${ZAP_TARGET} -r zap-baseline.html -J zap.json || true
+    - mkdir -p reports && mv .zap/zap-baseline.html reports/ && mv .zap/zap.json reports/ || true
+  artifacts:
+    when: always
+    paths:
+      - reports/zap-baseline.html
+      - reports/zap.json
+    expire_in: 1 week
+  after_script:
+    - docker compose -f docker-compose.yml --profile ci down -v || true
+
+publish_dockerhub:
+  stage: publish
+  image: docker:25.0.3
+  services:
+    - docker:25.0.3-dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  script:
+    - echo "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+    - docker tag $CI_REGISTRY_IMAGE/backend:${CI_COMMIT_SHORT_SHA} ${DOCKERHUB_USERNAME}/banking-backend:${CI_COMMIT_SHORT_SHA}
+    - docker tag $CI_REGISTRY_IMAGE/frontend:${CI_COMMIT_SHORT_SHA} ${DOCKERHUB_USERNAME}/banking-frontend:${CI_COMMIT_SHORT_SHA}
+    - docker push ${DOCKERHUB_USERNAME}/banking-backend:${CI_COMMIT_SHORT_SHA} || true
+    - docker push ${DOCKERHUB_USERNAME}/banking-frontend:${CI_COMMIT_SHORT_SHA} || true
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+deploy_compose:
+  stage: deploy
+  image: docker:25.0.3
+  services:
+    - docker:25.0.3-dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  script:
+    - docker compose up -d
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'

@@ -1,0 +1,28 @@
+
+name: devsecops_flawless
+
+services:
+  api:
+    build: ./backend
+    container_name: api
+    environment:
+      - PORT=3000
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 20
+
+  web:
+    build: ./frontend
+    container_name: web
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+
+profiles:
+  ci:
+    services: [api, web]

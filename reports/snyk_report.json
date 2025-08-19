@@ -1,0 +1,10 @@
+{
+  "project": "banking-backend",
+  "issues": [
+    {
+      "id": "SNYK-EXAMPLE-1",
+      "title": "Sample vulnerable dep",
+      "severity": "high"
+    }
+  ]
+}

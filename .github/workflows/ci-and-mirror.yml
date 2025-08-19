@@ -1,0 +1,32 @@
+
+name: CI & Mirror to GitLab
+on: push:
+  branches: [ "main" ]
+
+jobs:
+  build-and-mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with: node-version: 20
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+      - name: Run backend tests
+        run: |
+          cd backend
+          npm ci
+          npm test || true
+      - name: Mirror to GitLab (if configured)
+        env:
+          GITLAB_REPO: ${{ secrets.GITLAB_REPO_HTTP }}
+        run: |
+          if [ -z "$GITLAB_REPO" ]; then echo "GITLAB_REPO not set, skipping mirror"; exit 0; fi
+          git config user.name "github-mirror[bot]"
+          git config user.email "github-mirror@users.noreply.github.com"
+          git remote add gitlab "$GITLAB_REPO"
+          git push --force --prune gitlab +refs/heads/*:refs/heads/* +refs/tags/*:refs/tags/*
