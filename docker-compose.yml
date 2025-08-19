@@ -1,4 +1,3 @@
-
 name: devsecops_flawless
 
 services:
@@ -23,6 +22,3 @@ services:
     depends_on:
       - api
 
-profiles:
-  ci:
-    services: [api, web]
