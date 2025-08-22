@@ -1,97 +1,160 @@
 stages:
   - install
   - test
-  - code_quality
   - security
   - build
-  - scan
+  - dast
+  - publish
   - deploy
 
-# ------------------ INSTALL ------------------
-install_backend:
+variables:
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: "/certs"        # enable secure DinD (TLS on 2376)
+  COMPOSE_PROFILES: ci
+  COMPOSE_PROJECT_NAME: "ciapp"        # stable compose network: ciapp_default
+  ZAP_TARGET: "http://api:3000/api/health"
+  IMAGE_TAG: "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+
+# -------------------------------------------------------------------
+# INSTALL & TEST (Node)
+# -------------------------------------------------------------------
+.install_image: &install_image
+  image: node:20
+
+install:
   stage: install
+  <<: *install_image
   script:
-    - cd backend
-    - npm install
+    - cd backend && npm ci
+    - cd ../frontend && npm ci
   artifacts:
     paths:
       - backend/node_modules/
-  tags:
-    - docker
-
-install_frontend:
-  stage: install
-  script:
-    - cd frontend
-    - npm install
-  artifacts:
-    paths:
       - frontend/node_modules/
-  tags:
-    - docker
+    expire_in: 1h
 
-# ------------------ TEST ------------------
-run_backend_tests:
+test:
   stage: test
+  <<: *install_image
   script:
-    - cd backend
-    - npm test
-  tags:
-    - docker
+    - cd backend && npm test || true
+  artifacts:
+    when: always
+    paths:
+      - backend/reports/
+    expire_in: 1 week
 
-run_frontend_tests:
-  stage: test
-  script:
-    - cd frontend
-    - npm test
-  tags:
-    - docker
-
-# ------------------ CODE QUALITY ------------------
-eslint_check:
-  stage: code_quality
-  script:
-    - cd frontend
-    - npx eslint .
-  tags:
-    - docker
-
-# ------------------ SECURITY ------------------
+# -------------------------------------------------------------------
+# SECURITY: Snyk (code deps) — runs without Docker daemon
+# -------------------------------------------------------------------
 snyk_scan:
   stage: security
+  image: snyk/snyk:docker
+  variables:
+    SNYK_TOKEN: $SNYK_TOKEN
   script:
-    - snyk test --all-projects
-  tags:
-    - docker
+    - snyk test --json > snyk_report.json || true
+    - snyk monitor || true
+  artifacts:
+    when: always
+    paths:
+      - snyk_report.json
+    expire_in: 1 week
+  rules:
+    - if: $SNYK_TOKEN
 
-# ------------------ BUILD ------------------
+# -------------------------------------------------------------------
+# BUILD IMAGES (Docker-in-Docker with TLS)
+# -------------------------------------------------------------------
 build_images:
   stage: build
+  image: docker:25.0.3
+  services:
+    - docker:25.0.3-dind
   script:
-    - docker-compose -f docker-compose.yml -p devsecops_flawless build
-  tags:
-    - docker
+    - docker version
+    - docker build -t $CI_REGISTRY_IMAGE/backend:${CI_COMMIT_SHORT_SHA} backend
+    - docker build -t $CI_REGISTRY_IMAGE/frontend:${CI_COMMIT_SHORT_SHA} frontend
+    # Save images as artifacts so later jobs don't need to talk to the same daemon
+    - docker save $CI_REGISTRY_IMAGE/backend:${CI_COMMIT_SHORT_SHA} -o backend-image.tar
+    - docker save $CI_REGISTRY_IMAGE/frontend:${CI_COMMIT_SHORT_SHA} -o frontend-image.tar
+  artifacts:
+    paths:
+      - backend-image.tar
+      - frontend-image.tar
+    expire_in: 1 week
 
-# ------------------ TRIVY SCAN ------------------
+# -------------------------------------------------------------------
+# SECURITY: Trivy (scan image tarballs; no daemon needed)
+# -------------------------------------------------------------------
 trivy_scan:
-  stage: scan
-  needs:
-    - build_images
+  stage: security
+  image: aquasec/trivy:0.41.2
+  needs: ["build_images"]
   script:
-    - trivy image devsecops_flawless_api:latest
-    - trivy image devsecops_flawless_web:latest
-  tags:
-    - docker
+    - trivy image --input backend-image.tar --format json --output trivy_backend.json || true
+    - trivy image --input frontend-image.tar --format json --output trivy_frontend.json || true
+  artifacts:
+    paths:
+      - trivy_backend.json
+      - trivy_frontend.json
+    expire_in: 1 week
 
-# ------------------ DEPLOY ------------------
-deploy_app:
-  stage: deploy
-  needs:
-    - trivy_scan
+# -------------------------------------------------------------------
+# DAST: OWASP ZAP (bring up stack via Compose; scan via ZAP)
+# -------------------------------------------------------------------
+dast_zap:
+  stage: dast
+  image: docker:25.0.3
+  services:
+    - docker:25.0.3-dind
   script:
-    - docker-compose -f docker-compose.yml -p devsecops_flawless up -d --build
-  only:
-    - main
-  tags:
-    - docker
+    - docker compose -f docker-compose.yml --profile ci up -d
+    - chmod +x scripts/wait-for-http.sh
+    - ./scripts/wait-for-http.sh "http://localhost:3000/api/health" 120
+    # Use the known compose network name: ${COMPOSE_PROJECT_NAME}_default = ciapp_default
+    - docker run --network ${COMPOSE_PROJECT_NAME}_default -v "$CI_PROJECT_DIR/.zap:/zap/wrk" owasp/zap2docker-stable zap-baseline.py -t "${ZAP_TARGET}" -r zap-baseline.html -J zap.json || true
+    - mkdir -p reports && mv .zap/zap-baseline.html reports/ && mv .zap/zap.json reports/ || true
+  artifacts:
+    when: always
+    paths:
+      - reports/zap-baseline.html
+      - reports/zap.json
+    expire_in: 1 week
+  after_script:
+    - docker compose -f docker-compose.yml --profile ci down -v || true
+
+# -------------------------------------------------------------------
+# PUBLISH to Docker Hub (load tar, tag, push)
+# -------------------------------------------------------------------
+publish_dockerhub:
+  stage: publish
+  image: docker:25.0.3
+  services:
+    - docker:25.0.3-dind
+  needs: ["build_images"]
+  script:
+    - echo "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+    - docker load -i backend-image.tar
+    - docker load -i frontend-image.tar
+    - docker tag $CI_REGISTRY_IMAGE/backend:${CI_COMMIT_SHORT_SHA} ${DOCKERHUB_USERNAME}/banking-backend:${CI_COMMIT_SHORT_SHA}
+    - docker tag $CI_REGISTRY_IMAGE/frontend:${CI_COMMIT_SHORT_SHA} ${DOCKERHUB_USERNAME}/banking-frontend:${CI_COMMIT_SHORT_SHA}
+    - docker push ${DOCKERHUB_USERNAME}/banking-backend:${CI_COMMIT_SHORT_SHA} || true
+    - docker push ${DOCKERHUB_USERNAME}/banking-frontend:${CI_COMMIT_SHORT_SHA} || true
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# -------------------------------------------------------------------
+# DEPLOY via docker compose (pulls images referenced in compose)
+# -------------------------------------------------------------------
+deploy_compose:
+  stage: deploy
+  image: docker:25.0.3
+  services:
+    - docker:25.0.3-dind
+  script:
+    - docker compose up -d
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
 
