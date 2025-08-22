@@ -1,8 +1,8 @@
 stages:
   - install
   - test
+  - build        # ⬅ moved up before security
   - security
-  - build
   - dast
   - publish
   - deploy
@@ -45,25 +45,6 @@ test:
     expire_in: 1 week
 
 # -------------------------------------------------------------------
-# SECURITY: Snyk (code deps) — runs without Docker daemon
-# -------------------------------------------------------------------
-snyk_scan:
-  stage: security
-  image: snyk/snyk:docker
-  variables:
-    SNYK_TOKEN: $SNYK_TOKEN
-  script:
-    - snyk test --json > snyk_report.json || true
-    - snyk monitor || true
-  artifacts:
-    when: always
-    paths:
-      - snyk_report.json
-    expire_in: 1 week
-  rules:
-    - if: $SNYK_TOKEN
-
-# -------------------------------------------------------------------
 # BUILD IMAGES (Docker-in-Docker with TLS)
 # -------------------------------------------------------------------
 build_images:
@@ -83,6 +64,25 @@ build_images:
       - backend-image.tar
       - frontend-image.tar
     expire_in: 1 week
+
+# -------------------------------------------------------------------
+# SECURITY: Snyk (code deps) — runs without Docker daemon
+# -------------------------------------------------------------------
+snyk_scan:
+  stage: security
+  image: snyk/snyk:docker
+  variables:
+    SNYK_TOKEN: $SNYK_TOKEN
+  script:
+    - snyk test --json > snyk_report.json || true
+    - snyk monitor || true
+  artifacts:
+    when: always
+    paths:
+      - snyk_report.json
+    expire_in: 1 week
+  rules:
+    - if: $SNYK_TOKEN
 
 # -------------------------------------------------------------------
 # SECURITY: Trivy (scan image tarballs; no daemon needed)
@@ -156,5 +156,3 @@ deploy_compose:
     - docker compose up -d
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
-
-
