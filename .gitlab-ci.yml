@@ -116,11 +116,21 @@ dast_zap:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
   script:
+    # Ensure reports folder exists
+    - mkdir -p $CI_PROJECT_DIR/.zap
+    # Bring up services
     - docker compose -f docker-compose.yml --profile ci up -d
+    # Wait until API is ready
     - chmod +x scripts/wait-for-http.sh
     - ./scripts/wait-for-http.sh "http://localhost:3000/api/health" 120
-    - docker run --network ${COMPOSE_PROJECT_NAME}_default -v "$CI_PROJECT_DIR/.zap:/zap/wrk" owasp/zap2docker-stable zap-baseline.py -t "${ZAP_TARGET}" -r zap-baseline.html -J zap.json || true
-    - mkdir -p reports && mv .zap/zap-baseline.html reports/ && mv .zap/zap.json reports/ || true
+    # Run ZAP scan
+    - docker run --network ${COMPOSE_PROJECT_NAME}_default -v "$CI_PROJECT_DIR/.zap:/zap/wrk" \
+      owasp/zap2docker-stable zap-baseline.py \
+      -t "${ZAP_TARGET}" -r zap-baseline.html -J zap.json || true
+    # Move reports to GitLab artifacts folder
+    - mkdir -p reports
+    - mv $CI_PROJECT_DIR/.zap/zap-baseline.html reports/
+    - mv $CI_PROJECT_DIR/.zap/zap.json reports/
   artifacts:
     when: always
     paths:
@@ -129,6 +139,7 @@ dast_zap:
     expire_in: 1 week
   after_script:
     - docker compose -f docker-compose.yml --profile ci down -v || true
+
 
 # -------------------------------------------------------------------
 # PUBLISH to Docker Hub
