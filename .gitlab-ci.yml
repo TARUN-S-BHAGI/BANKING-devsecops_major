@@ -31,7 +31,7 @@ install:
     paths:
       - backend/node_modules/
       - frontend/node_modules/
-    expire_in: 1h
+    expire_in: never
 
 test:
   stage: test
@@ -42,10 +42,10 @@ test:
     when: always
     paths:
       - backend/reports/
-    expire_in: 1 week
+    expire_in: never
 
 # -------------------------------------------------------------------
-# BUILD IMAGES (Docker-in-Docker with TLS)
+# BUILD IMAGES (Docker-in-Docker)
 # -------------------------------------------------------------------
 build_images:
   stage: build
@@ -66,10 +66,10 @@ build_images:
     paths:
       - backend-image.tar
       - frontend-image.tar
-    expire_in: 1 week
+    expire_in: never
 
 # -------------------------------------------------------------------
-# SECURITY: Snyk (code deps)
+# SECURITY: Snyk
 # -------------------------------------------------------------------
 snyk_scan:
   stage: security
@@ -83,12 +83,12 @@ snyk_scan:
     when: always
     paths:
       - snyk_report.json
-    expire_in: 1 week
+    expire_in: never
   rules:
     - if: $SNYK_TOKEN
 
 # -------------------------------------------------------------------
-# SECURITY: Trivy (scan image tarballs)
+# SECURITY: Trivy
 # -------------------------------------------------------------------
 trivy_scan:
   stage: security
@@ -101,10 +101,10 @@ trivy_scan:
     paths:
       - trivy_backend.json
       - trivy_frontend.json
-    expire_in: 1 week
+    expire_in: never
 
 # -------------------------------------------------------------------
-# DAST: OWASP ZAP
+# DAST: OWASP ZAP (manual scan)
 # -------------------------------------------------------------------
 dast_zap:
   stage: dast
@@ -130,7 +130,7 @@ dast_zap:
     paths:
       - reports/zap-baseline.html
       - reports/zap.json
-    expire_in: 1 week
+    expire_in: never
   after_script:
     - docker compose -f docker-compose.yml --profile ci down -v || true
 
